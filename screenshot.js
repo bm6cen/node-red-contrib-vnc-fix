@@ -19,19 +19,25 @@ module.exports = function(RED) {
           if (this.client.connect && typeof this.client.connect === 'function') {
               this.client.connect();
           }
-          // Wake VNC server with a mouse click at (1,1)
+          // Wake VNC server with two mouse clicks
           this.client.perform((err) => {
               if (err) {
-                  node.error('Failed to perform wake click: ' + err);
+                  node.error('Failed to perform wake clicks: ' + err);
                   // Continue anyway?
               } else {
                   var r = this.client.rfb;
                   if (r) {
-                      // Send mouse down
-                      r.pointerEvent(1, 1, 1); // left button down
-                      // Send mouse up after 50ms
-                      setTimeout(function() {
-                          r.pointerEvent(1, 1, 0); // left button up
+                      // First click at (1,1)
+                      r.pointerEvent(1, 1, 1); // down
+                      setTimeout(() => {
+                          r.pointerEvent(1, 1, 0); // up
+                          // Second click at (1,2) after a short delay
+                          setTimeout(() => {
+                              r.pointerEvent(1, 2, 1); // down
+                              setTimeout(() => {
+                                  r.pointerEvent(1, 2, 0); // up
+                              }, 50);
+                          }, 50);
                       }, 50);
                   }
               }
@@ -111,4 +117,5 @@ parseRectAsRGBABuffer = (rect) => {
     rgba.writeUInt8(255, i + 3);              // A
   }
   return rgba;
+};
 };
