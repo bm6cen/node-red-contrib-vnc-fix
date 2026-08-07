@@ -84,8 +84,8 @@ module.exports = function(RED) {
                       r.removeListener('rect', onRect);
                   }
                   r.once('rect', onRect);
-                  // Request update of the whole screen
-                  r.requestUpdate(false, 0, 0, r.width, r.height);
+                  // Force a full screen update to wake up old VNC servers
+                  r.requestUpdate(true, 0, 0, r.width, r.height);
               });
           });
       });
@@ -117,5 +117,4 @@ parseRectAsRGBABuffer = (rect) => {
     rgba.writeUInt8(255, i + 3);              // A
   }
   return rgba;
-};
 };
