@@ -2,7 +2,8 @@
 Node-red node allowing control of a VNC Server
 
 *N.B. This has been thrown together for a personal project and it's most-likely not efficent and doesn't have much error handling! I have released it as I cannot find VNC nodes elsewhere so it may be useful to others for similar purposes. I will try to release updates when time permits*
-20260808 fix by ai
+
+##20260808 fix by ai
 加入了以下功能：
 
 1. 喚醒 VNC 伺服器：在進行截圖前，先透過 VNC 客戶端執行滑鼠點擊（座標 x=1, y=1，左鍵按下 50ms 後釋放），以喚醒可能進入休眠的 VNC 伺服器。  
