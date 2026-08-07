@@ -8,43 +8,79 @@ module.exports = function(RED) {
       if (this.client) {
           this.client.nodes.push(this);
       }
+      var disconnectTimer = null;
 
       node.on('input', function(msg) {
           if (!this.client) {
               node.error('Missing VNC client configuration');
               return;
           }
+          // Ensure client is connected
+          if (this.client.connect && typeof this.client.connect === 'function') {
+              this.client.connect();
+          }
+          // Wake VNC server with a mouse click at (1,1)
           this.client.perform((err) => {
               if (err) {
-                  node.status(this.client.statuses.error);
-                  return;
-              }
-              var r = this.client.rfb;
-              if (!r) {
-                  node.error('No RFB instance');
-                  return;
-              }
-              // Listen for a single rect update
-              r.once('rect', (rect) => {
-                  try {
-                      var png = new Jimp({data: parseRectAsRGBABuffer(rect), height: rect.height, width: rect.width});
-                      png.getBuffer(Jimp.MIME_PNG, (err,buf) => {
-                          if (err){
-                              node.error('Jimp buffer error: ' + err);
-                              msg.payload = "Error: " + err;
-                          } else {
-                              msg.payload = buf;
-                          }
-                          node.send(msg);
-                      });
-                  } catch (e) {
-                      node.error('Jimp error: ' + e);
-                      msg.payload = "Error: " + e;
-                      node.send(msg);
+                  node.error('Failed to perform wake click: ' + err);
+                  // Continue anyway?
+              } else {
+                  var r = this.client.rfb;
+                  if (r) {
+                      // Send mouse down
+                      r.pointerEvent(1, 1, 1); // left button down
+                      // Send mouse up after 50ms
+                      setTimeout(function() {
+                          r.pointerEvent(1, 1, 0); // left button up
+                      }, 50);
                   }
+              }
+              // Now proceed with screenshot
+              this.client.perform((err2) => {
+                  if (err2) {
+                      node.status(this.client.statuses.error);
+                      return;
+                  }
+                  var r = this.client.rfb;
+                  if (!r) {
+                      node.error('No RFB instance');
+                      return;
+                  }
+                  // Listen for a single rect update
+                  function onRect(rect) {
+                      try {
+                          var png = new Jimp({data: parseRectAsRGBABuffer(rect), height: rect.height, width: rect.width});
+                          png.getBuffer(Jimp.MIME_PNG, (err,buf) => {
+                              if (err){
+                                  node.error('Jimp buffer error: ' + err);
+                                  msg.payload = 'Error: ' + err;
+                              } else {
+                                  msg.payload = buf;
+                              }
+                              node.send(msg);
+                              // Start disconnect timer after sending screenshot
+                              if (disconnectTimer !== null) {
+                                  clearTimeout(disconnectTimer);
+                              }
+                              disconnectTimer = setTimeout(function() {
+                                  if (node.client && typeof node.client.disconnect === 'function') {
+                                      node.client.disconnect();
+                                      node.status({fill:"green",shape:"dot",text:"disconnected"});
+                                  }
+                              }, 3 * 60 * 1000); // 3 minutes
+                          });
+                      } catch (e) {
+                          node.error('Jimp error: ' + e);
+                          msg.payload = 'Error: ' + e;
+                          node.send(msg);
+                      }
+                      // Important: remove listener after receiving rect
+                      r.removeListener('rect', onRect);
+                  }
+                  r.once('rect', onRect);
+                  // Request update of the whole screen
+                  r.requestUpdate(false, 0, 0, r.width, r.height);
               });
-              // Request update of the whole screen
-              r.requestUpdate(false, 0, 0, r.width, r.height);
           });
       });
 
@@ -52,6 +88,9 @@ module.exports = function(RED) {
           if (this.client) {
               var idx = this.client.nodes.indexOf(this);
               if (idx >= 0) this.client.nodes.splice(idx,1);
+          }
+          if (disconnectTimer !== null) {
+              clearTimeout(disconnectTimer);
           }
       });
   }
