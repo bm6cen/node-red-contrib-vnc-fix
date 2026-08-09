@@ -3,12 +3,15 @@ Node-red node allowing control of a VNC Server
 
 *N.B. This has been thrown together for a personal project and it's most-likely not efficent and doesn't have much error handling! I have released it as I cannot find VNC nodes elsewhere so it may be useful to others for similar purposes. I will try to release updates when time permits*
 
-##20260808 fix by ai
+##20260809 fix by ai
 加入了以下功能：
 
-1. 喚醒 VNC 伺服器：在進行截圖前，先透過 VNC 客戶端執行滑鼠點擊（座標 x=1, y=1，左鍵按下 50ms 後釋放），以喚醒可能進入休眠的 VNC 伺服器。  
-2. 截圖後 3 分鐘自動斷線：與先前的需求相同，截圖完成後會啟動 3 分鐘（180,000 毫秒）計時器，計時結束時呼叫客戶端的 disconnect() 方法並更新節點狀態為「已斷線」。  
-3. 重複觸發時重新連線：每次收到輸入訊息時，都會先確保連線（呼叫 connect()），執行喚醒點擊，進行截圖，然後重新計時，因而能達到「觸發時連線、截圖後 3 分鐘斷線，下次觸發時重新連線」的循環。
+加入 喚醒序列：滑鼠移至 (0,0) → (1,1) → 在 (0,0) 點擊兩次（延遲 1.5 秒），以喚醒可能處於休眠的 VNC 伺服器。  
+   - 使用 client.getFreshFrame()（逾時 2.5 秒）要求完整畫面更新，確保取得最新畫面。  
+   - 截圖完成後進行 黑畫面偵測：若像素中 ≥90% 為近似黑色（R、G、B < 10），則視為未喚醒，最多重試 3 次（每次重新喚醒後再擷取）。  
+   - 新增 畫面比對：將本次擷取的 PNG 與同一 VNC 伺服器上一次成功擷取的畫面進行位元組比對。若完全相同，則重試最多 3 次；超過重試次數後會 斷線後重新連線（呼叫 client.disconnect() 待 1 秒後再次進行擷取流程）。  
+   - 成功擷取後會將該畫面儲存為該 VNC 客戶端的「最後一幀」，並啟動 3 分鐘自動斷線計時器（計時到期呼叫 client.disconnect() 並將節點狀態設為 disconnected）。  
+   - 加入 busy 標籤防止重複觸發，節點關閉時會清理所有 rect 監聽器與計時器。
 
 
 
