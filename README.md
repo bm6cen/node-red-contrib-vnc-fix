@@ -1,3 +1,6 @@
+#forked from Rizzlar/node-red-contrib-vnc since 202608
+
+
 # node-red-contrib-vnc
 Node-red node allowing control of a VNC Server
 
@@ -40,3 +43,4 @@ None!
 ## Credits
 * **node-rfb2** - https://github.com/sidorares/node-rfb2
 * **JIMP** - https://github.com/oliver-moran/jimp
+*  **Rizzlar** -https://github.com/Rizzlar/node-red-contrib-vnc
