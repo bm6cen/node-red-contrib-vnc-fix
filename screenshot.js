@@ -1,8 +1,8 @@
-var Jimp = require('jimp');
+var Jimp = require("jimp");
 
 module.exports = function(RED) {
 
-    function screenshotNode(config) {
+    function ScreenshotNode(config) {
 
         RED.nodes.createNode(
             this,
@@ -10,10 +10,6 @@ module.exports = function(RED) {
         );
 
         var node = this;
-
-        // ============================================================
-        // VNC client
-        // ============================================================
 
         this.client =
             RED.nodes.getNode(
@@ -23,67 +19,61 @@ module.exports = function(RED) {
         if (!this.client) {
 
             node.error(
-                'Missing VNC client configuration'
+                "VNC client not configured"
             );
 
             return;
 
         }
 
-        if (!this.client.nodes) {
+        if (
+            !this.client.nodes
+        ) {
+
             this.client.nodes = [];
+
         }
 
         this.client.nodes.push(
             this
         );
 
-        // ============================================================
-        // Configuration
-        // ============================================================
-
-        var disconnectTimer = null;
-
-        var busy = false;
-
-        var wakeRetryCount = 0;
-
-        var reconnectRetryCount = 0;
-
-        var MAX_WAKE_RETRIES = 3;
-
-        var MAX_RECONNECT_RETRIES = 2;
+        /*
+         * ----------------------------------------------------------
+         * SETTINGS
+         * ----------------------------------------------------------
+         */
 
         var WAKE_DELAY = 1500;
 
-        var CAPTURE_TIMEOUT = 6000;
+        var FRAME_TIMEOUT = 6000;
 
         var BLACK_THRESHOLD = 0.90;
 
-        var BLACK_PIXEL_THRESHOLD = 12;
+        var BLACK_PIXEL = 15;
 
-        // ============================================================
-        // Input
-        // ============================================================
+        var MAX_WAKE_RETRY = 2;
+
+        var busy = false;
+
+        var wakeRetry = 0;
+
+        var disconnectTimer = null;
+
+        /*
+         * ----------------------------------------------------------
+         * INPUT
+         * ----------------------------------------------------------
+         */
 
         node.on(
-            'input',
+            "input",
             function(msg) {
 
                 if (busy) {
 
                     node.warn(
-                        'Screenshot already in progress - request ignored'
-                    );
-
-                    return;
-
-                }
-
-                if (!node.client) {
-
-                    node.error(
-                        'Missing VNC client configuration'
+                        "Screenshot already running"
                     );
 
                     return;
@@ -92,53 +82,73 @@ module.exports = function(RED) {
 
                 busy = true;
 
-                wakeRetryCount = 0;
+                wakeRetry = 0;
 
-                reconnectRetryCount = 0;
+                node.setStatus =
+                    function(
+                        fill,
+                        shape,
+                        text
+                    ) {
 
-                node.status({
-                    fill: 'yellow',
-                    shape: 'dot',
-                    text: 'starting capture'
-                });
+                        try {
 
-                captureAndSend(
+                            node.status({
+                                fill: fill,
+                                shape: shape,
+                                text: text
+                            });
+
+                        }
+                        catch (e) {}
+
+                    };
+
+                node.setStatus(
+                    "yellow",
+                    "dot",
+                    "start"
+                );
+
+                capture(
                     msg
                 );
 
             }
         );
 
-        // ============================================================
-        // Main capture
-        // ============================================================
+        /*
+         * ----------------------------------------------------------
+         * CAPTURE
+         * ----------------------------------------------------------
+         */
 
-        function captureAndSend(msg) {
+        function capture(msg) {
 
             if (!node.client) {
 
-                finishError(
-                    'VNC client unavailable'
+                fail(
+                    "VNC client unavailable"
                 );
 
                 return;
 
             }
 
-            node.status({
-                fill: 'yellow',
-                shape: 'dot',
-                text: 'connecting'
-            });
+            node.setStatus(
+                "yellow",
+                "ring",
+                "connect"
+            );
 
             node.client.perform(
                 function(err) {
 
                     if (err) {
 
-                        handleConnectionError(
-                            msg,
-                            err
+                        fail(
+                            "VNC connect failed: " +
+                            err.message
                         );
 
                         return;
@@ -146,19 +156,16 @@ module.exports = function(RED) {
                     }
 
                     /*
-                     * At this point TCP/VNC connection exists.
-                     *
-                     * Wake the HMI before requesting the
-                     * framebuffer.
+                     * Wake MT8071iE.
                      */
 
-                    wakeScreen(
+                    wake(
                         function(wakeErr) {
 
                             if (wakeErr) {
 
-                                finishError(
-                                    'Wake sequence failed: ' +
+                                fail(
+                                    "Wake failed: " +
                                     wakeErr.message
                                 );
 
@@ -167,14 +174,13 @@ module.exports = function(RED) {
                             }
 
                             /*
-                             * Give the HMI/VNC server time to
-                             * repaint after wake-up.
+                             * Allow HMI to repaint.
                              */
 
                             setTimeout(
                                 function() {
 
-                                    captureFreshFramebuffer(
+                                    getFrame(
                                         msg
                                     );
 
@@ -190,15 +196,13 @@ module.exports = function(RED) {
 
         }
 
-        // ============================================================
-        // Wake HMI
-        // ============================================================
+        /*
+         * ----------------------------------------------------------
+         * WAKE
+         * ----------------------------------------------------------
+         */
 
-        function wakeScreen(callback) {
-
-            callback =
-                callback ||
-                function() {};
+        function wake(callback) {
 
             if (
                 !node.client ||
@@ -207,7 +211,7 @@ module.exports = function(RED) {
 
                 callback(
                     new Error(
-                        'VNC connection unavailable'
+                        "VNC unavailable"
                     )
                 );
 
@@ -221,12 +225,7 @@ module.exports = function(RED) {
             try {
 
                 /*
-                 * Wake sequence:
-                 *
-                 * move 0,0
-                 * move 1,1
-                 * click
-                 * click
+                 * Move cursor.
                  */
 
                 r.pointerEvent(
@@ -239,13 +238,12 @@ module.exports = function(RED) {
                     function() {
 
                         if (
-                            !node.client ||
                             !node.client.rfb
                         ) {
 
                             callback(
                                 new Error(
-                                    'VNC disconnected during wake'
+                                    "VNC disconnected"
                                 )
                             );
 
@@ -253,7 +251,7 @@ module.exports = function(RED) {
 
                         }
 
-                        node.client.rfb.pointerEvent(
+                        r.pointerEvent(
                             1,
                             1,
                             0
@@ -262,22 +260,7 @@ module.exports = function(RED) {
                         setTimeout(
                             function() {
 
-                                if (
-                                    !node.client ||
-                                    !node.client.rfb
-                                ) {
-
-                                    callback(
-                                        new Error(
-                                            'VNC disconnected during wake'
-                                        )
-                                    );
-
-                                    return;
-
-                                }
-
-                                node.client.rfb.pointerEvent(
+                                r.pointerEvent(
                                     0,
                                     0,
                                     1
@@ -286,22 +269,7 @@ module.exports = function(RED) {
                                 setTimeout(
                                     function() {
 
-                                        if (
-                                            !node.client ||
-                                            !node.client.rfb
-                                        ) {
-
-                                            callback(
-                                                new Error(
-                                                    'VNC disconnected during wake'
-                                                )
-                                            );
-
-                                            return;
-
-                                        }
-
-                                        node.client.rfb.pointerEvent(
+                                        r.pointerEvent(
                                             0,
                                             0,
                                             0
@@ -310,22 +278,7 @@ module.exports = function(RED) {
                                         setTimeout(
                                             function() {
 
-                                                if (
-                                                    !node.client ||
-                                                    !node.client.rfb
-                                                ) {
-
-                                                    callback(
-                                                        new Error(
-                                                            'VNC disconnected during wake'
-                                                        )
-                                                    );
-
-                                                    return;
-
-                                                }
-
-                                                node.client.rfb.pointerEvent(
+                                                r.pointerEvent(
                                                     0,
                                                     0,
                                                     1
@@ -334,22 +287,7 @@ module.exports = function(RED) {
                                                 setTimeout(
                                                     function() {
 
-                                                        if (
-                                                            !node.client ||
-                                                            !node.client.rfb
-                                                        ) {
-
-                                                            callback(
-                                                                new Error(
-                                                                    'VNC disconnected during wake'
-                                                                )
-                                                            );
-
-                                                            return;
-
-                                                        }
-
-                                                        node.client.rfb.pointerEvent(
+                                                        r.pointerEvent(
                                                             0,
                                                             0,
                                                             0
@@ -380,57 +318,30 @@ module.exports = function(RED) {
             }
             catch (err) {
 
-                callback(err);
+                callback(
+                    err
+                );
 
             }
 
         }
 
-        // ============================================================
-        // Capture fresh framebuffer
-        // ============================================================
+        /*
+         * ----------------------------------------------------------
+         * GET FRAME
+         * ----------------------------------------------------------
+         */
 
-        function captureFreshFramebuffer(
-            msg
-        ) {
+        function getFrame(msg) {
 
-            if (
-                !node.client ||
-                !node.client.connected
-            ) {
-
-                handleConnectionError(
-                    msg,
-                    new Error(
-                        'VNC disconnected before framebuffer capture'
-                    )
-                );
-
-                return;
-
-            }
-
-            node.status({
-                fill: 'blue',
-                shape: 'dot',
-                text: 'requesting full framebuffer'
-            });
-
-            /*
-             * IMPORTANT:
-             *
-             * captureFrame() performs:
-             *
-             * 1. reset framebuffer
-             * 2. reset coverage
-             * 3. requestUpdate(false)
-             * 4. collect ALL RECTs
-             * 5. wait until coverage = 100%
-             * 6. return complete framebuffer
-             */
+            node.setStatus(
+                "blue",
+                "dot",
+                "request framebuffer"
+            );
 
             node.client.captureFrame(
-                CAPTURE_TIMEOUT,
+                FRAME_TIMEOUT,
                 function(
                     err,
                     frame
@@ -438,52 +349,45 @@ module.exports = function(RED) {
 
                     if (err) {
 
-                        handleFrameError(
-                            msg,
-                            err
+                        /*
+                         * Timeout is a real error.
+                         *
+                         * But DON'T immediately reconnect
+                         * repeatedly.
+                         */
+
+                        fail(
+                            "Framebuffer failed: " +
+                            err.message
                         );
 
                         return;
 
                     }
 
-                    if (!frame) {
+                    if (
+                        !frame ||
+                        !frame.data
+                    ) {
 
-                        handleFrameError(
-                            msg,
-                            new Error(
-                                'Empty framebuffer'
-                            )
+                        fail(
+                            "Empty framebuffer"
                         );
 
                         return;
 
                     }
 
-                    if (!frame.complete) {
+                    node.setStatus(
+                        "blue",
+                        "dot",
+                        "encoding " +
+                        frame.width +
+                        "x" +
+                        frame.height
+                    );
 
-                        handleFrameError(
-                            msg,
-                            new Error(
-                                'Framebuffer is incomplete'
-                            )
-                        );
-
-                        return;
-
-                    }
-
-                    node.status({
-                        fill: 'blue',
-                        shape: 'dot',
-                        text:
-                            'encoding ' +
-                            frame.width +
-                            'x' +
-                            frame.height
-                    });
-
-                    encodeFramebuffer(
+                    encode(
                         msg,
                         frame
                     );
@@ -493,11 +397,13 @@ module.exports = function(RED) {
 
         }
 
-        // ============================================================
-        // Encode framebuffer → PNG
-        // ============================================================
+        /*
+         * ----------------------------------------------------------
+         * ENCODE
+         * ----------------------------------------------------------
+         */
 
-        function encodeFramebuffer(
+        function encode(
             msg,
             frame
         ) {
@@ -506,22 +412,27 @@ module.exports = function(RED) {
 
                 var image =
                     new Jimp({
-                        data: frame.data,
-                        width: frame.width,
-                        height: frame.height
+                        data:
+                            frame.data,
+
+                        width:
+                            frame.width,
+
+                        height:
+                            frame.height
                     });
 
                 image.getBuffer(
                     Jimp.MIME_PNG,
                     function(
                         err,
-                        pngBuffer
+                        png
                     ) {
 
                         if (err) {
 
-                            finishError(
-                                'PNG encoding error: ' +
+                            fail(
+                                "PNG encode failed: " +
                                 err.message
                             );
 
@@ -530,12 +441,15 @@ module.exports = function(RED) {
                         }
 
                         /*
-                         * Correctly await black-screen
-                         * analysis.
+                         * IMPORTANT:
+                         *
+                         * Do not reconnect because the
+                         * image happens to be identical
+                         * to the previous screenshot.
                          */
 
-                        isMostlyBlack(
-                            pngBuffer,
+                        detectBlack(
+                            png,
                             function(
                                 blackErr,
                                 isBlack,
@@ -544,8 +458,8 @@ module.exports = function(RED) {
 
                                 if (blackErr) {
 
-                                    finishError(
-                                        'Black-screen detection error: ' +
+                                    fail(
+                                        "Black detection failed: " +
                                         blackErr.message
                                     );
 
@@ -553,11 +467,66 @@ module.exports = function(RED) {
 
                                 }
 
+                                /*
+                                 * Black framebuffer.
+                                 */
+
                                 if (isBlack) {
 
-                                    handleBlackFrame(
-                                        msg,
-                                        ratio
+                                    if (
+                                        wakeRetry <
+                                        MAX_WAKE_RETRY
+                                    ) {
+
+                                        wakeRetry++;
+
+                                        node.warn(
+                                            "Black framebuffer: " +
+                                            Math.round(
+                                                ratio *
+                                                100
+                                            ) +
+                                            "%, wake retry " +
+                                            wakeRetry
+                                        );
+
+                                        wake(
+                                            function(
+                                                wakeErr
+                                            ) {
+
+                                                if (
+                                                    wakeErr
+                                                ) {
+
+                                                    fail(
+                                                        wakeErr.message
+                                                    );
+
+                                                    return;
+
+                                                }
+
+                                                setTimeout(
+                                                    function() {
+
+                                                        getFrame(
+                                                            msg
+                                                        );
+
+                                                    },
+                                                    WAKE_DELAY
+                                                );
+
+                                            }
+                                        );
+
+                                        return;
+
+                                    }
+
+                                    fail(
+                                        "MT8071iE framebuffer remains black after wake retries"
                                     );
 
                                     return;
@@ -565,18 +534,13 @@ module.exports = function(RED) {
                                 }
 
                                 /*
+                                 * ------------------------------------------------
                                  * SUCCESS
+                                 * ------------------------------------------------
                                  */
 
                                 msg.payload =
-                                    pngBuffer;
-
-                                /*
-                                 * Optional metadata.
-                                 *
-                                 * Existing flows using only
-                                 * msg.payload are unaffected.
-                                 */
+                                    png;
 
                                 msg.vnc =
                                     msg.vnc ||
@@ -588,44 +552,36 @@ module.exports = function(RED) {
                                 msg.vnc.frameTimestamp =
                                     frame.timestamp;
 
+                                msg.vnc.rectCount =
+                                    frame.rectCount;
+
                                 msg.vnc.width =
                                     frame.width;
 
                                 msg.vnc.height =
                                     frame.height;
 
-                                msg.vnc.coverage =
-                                    frame.coveredPixels +
-                                    '/' +
-                                    frame.totalPixels;
-
-                                msg.vnc.complete =
-                                    frame.complete;
-
                                 node.send(
                                     msg
                                 );
 
-                                node.status({
-                                    fill: 'green',
-                                    shape: 'dot',
-                                    text:
-                                        'frame ' +
-                                        frame.sequence +
-                                        ' ready'
-                                });
+                                node.setStatus(
+                                    "green",
+                                    "dot",
+                                    "frame " +
+                                    frame.sequence
+                                );
 
-                                scheduleDisconnect();
-
-                                /*
-                                 * Capture finished.
-                                 */
+                                wakeRetry = 0;
 
                                 busy = false;
 
-                                wakeRetryCount = 0;
+                                /*
+                                 * Keep connection alive for
+                                 * 3 minutes.
+                                 */
 
-                                reconnectRetryCount = 0;
+                                scheduleDisconnect();
 
                             }
 
@@ -637,8 +593,8 @@ module.exports = function(RED) {
             }
             catch (err) {
 
-                finishError(
-                    'Framebuffer/Jimp error: ' +
+                fail(
+                    "Image processing failed: " +
                     err.message
                 );
 
@@ -646,17 +602,19 @@ module.exports = function(RED) {
 
         }
 
-        // ============================================================
-        // Black screen detection
-        // ============================================================
+        /*
+         * ----------------------------------------------------------
+         * BLACK DETECTION
+         * ----------------------------------------------------------
+         */
 
-        function isMostlyBlack(
-            pngBuffer,
+        function detectBlack(
+            png,
             callback
         ) {
 
             Jimp.read(
-                pngBuffer,
+                png,
                 function(
                     err,
                     image
@@ -681,9 +639,12 @@ module.exports = function(RED) {
                         image.bitmap.height;
 
                     var total =
-                        width * height;
+                        width *
+                        height;
 
-                    if (total <= 0) {
+                    if (
+                        total <= 0
+                    ) {
 
                         callback(
                             null,
@@ -696,12 +657,7 @@ module.exports = function(RED) {
                     }
 
                     /*
-                     * Instead of only checking the first 100
-                     * pixels, sample the whole image with a
-                     * controlled stride.
-                     *
-                     * This avoids a black top-left corner
-                     * causing a false positive.
+                     * Sample approximately 5000 pixels.
                      */
 
                     var maxSamples = 5000;
@@ -715,25 +671,27 @@ module.exports = function(RED) {
                             )
                         );
 
-                    var blackCount = 0;
+                    var black = 0;
 
                     var samples = 0;
 
+                    var i;
+
                     for (
-                        var index = 0;
-                        index < total;
-                        index += step
+                        i = 0;
+                        i < total;
+                        i += step
                     ) {
 
                         var x =
-                            index % width;
+                            i % width;
 
                         var y =
                             Math.floor(
-                                index / width
+                                i / width
                             );
 
-                        var rgba =
+                        var color =
                             Jimp.int32ToRGBA(
                                 image.getPixelColor(
                                     x,
@@ -742,15 +700,15 @@ module.exports = function(RED) {
                             );
 
                         if (
-                            rgba.r <=
-                                BLACK_PIXEL_THRESHOLD &&
-                            rgba.g <=
-                                BLACK_PIXEL_THRESHOLD &&
-                            rgba.b <=
-                                BLACK_PIXEL_THRESHOLD
+                            color.r <=
+                                BLACK_PIXEL &&
+                            color.g <=
+                                BLACK_PIXEL &&
+                            color.b <=
+                                BLACK_PIXEL
                         ) {
 
-                            blackCount++;
+                            black++;
 
                         }
 
@@ -760,7 +718,7 @@ module.exports = function(RED) {
 
                     var ratio =
                         samples > 0
-                            ? blackCount /
+                            ? black /
                               samples
                             : 1;
 
@@ -776,307 +734,21 @@ module.exports = function(RED) {
 
         }
 
-        // ============================================================
-        // Handle black frame
-        // ============================================================
-
-        function handleBlackFrame(
-            msg,
-            ratio
-        ) {
-
-            node.warn(
-                'Mostly black framebuffer detected: ' +
-                Math.round(
-                    ratio * 100
-                ) +
-                '%'
-            );
-
-            if (
-                wakeRetryCount <
-                MAX_WAKE_RETRIES
-            ) {
-
-                wakeRetryCount++;
-
-                node.status({
-                    fill: 'yellow',
-                    shape: 'ring',
-                    text:
-                        'wake retry ' +
-                        wakeRetryCount +
-                        '/' +
-                        MAX_WAKE_RETRIES
-                });
-
-                wakeScreen(
-                    function(err) {
-
-                        if (err) {
-
-                            handleFrameError(
-                                msg,
-                                err
-                            );
-
-                            return;
-
-                        }
-
-                        setTimeout(
-                            function() {
-
-                                captureFreshFramebuffer(
-                                    msg
-                                );
-
-                            },
-                            WAKE_DELAY
-                        );
-
-                    }
-                );
-
-                return;
-
-            }
-
-            /*
-             * Wake retries exhausted.
-             *
-             * Reconnect completely.
-             */
-
-            if (
-                reconnectRetryCount <
-                MAX_RECONNECT_RETRIES
-            ) {
-
-                reconnectRetryCount++;
-
-                node.warn(
-                    'Wake retries exhausted. ' +
-                    'Forcing VNC reconnect ' +
-                    reconnectRetryCount +
-                    '/' +
-                    MAX_RECONNECT_RETRIES
-                );
-
-                forceReconnect(
-                    msg
-                );
-
-                return;
-
-            }
-
-            finishError(
-                'Unable to obtain a non-black framebuffer after wake/reconnect retries'
-            );
-
-        }
-
-        // ============================================================
-        // Frame error
-        // ============================================================
-
-        function handleFrameError(
-            msg,
-            err
-        ) {
-
-            node.warn(
-                'Framebuffer capture failed: ' +
-                err.message
-            );
-
-            if (
-                reconnectRetryCount <
-                MAX_RECONNECT_RETRIES
-            ) {
-
-                reconnectRetryCount++;
-
-                forceReconnect(
-                    msg
-                );
-
-                return;
-
-            }
-
-            finishError(
-                'Framebuffer capture failed: ' +
-                err.message
-            );
-
-        }
-
-        // ============================================================
-        // Connection error
-        // ============================================================
-
-        function handleConnectionError(
-            msg,
-            err
-        ) {
-
-            if (
-                reconnectRetryCount <
-                MAX_RECONNECT_RETRIES
-            ) {
-
-                reconnectRetryCount++;
-
-                node.warn(
-                    'VNC connection problem: ' +
-                    err.message +
-                    ' - reconnecting'
-                );
-
-                forceReconnect(
-                    msg
-                );
-
-                return;
-
-            }
-
-            finishError(
-                'VNC connection error: ' +
-                err.message
-            );
-
-        }
-
-        // ============================================================
-        // Force reconnect
-        // ============================================================
-
-        function forceReconnect(
-            msg
-        ) {
-
-            node.status({
-                fill: 'yellow',
-                shape: 'ring',
-                text: 'reconnecting'
-            });
-
-            try {
-
-                if (
-                    node.client &&
-                    typeof node.client.disconnect ===
-                        'function'
-                ) {
-
-                    node.client.disconnect();
-
-                }
-
-            }
-            catch (err) {
-
-                node.warn(
-                    'Disconnect error: ' +
-                    err.message
-                );
-
-            }
-
-            setTimeout(
-                function() {
-
-                    if (!node.client) {
-
-                        finishError(
-                            'VNC client unavailable'
-                        );
-
-                        return;
-
-                    }
-
-                    node.client.perform(
-                        function(err) {
-
-                            if (err) {
-
-                                finishError(
-                                    'Reconnect failed: ' +
-                                    err.message
-                                );
-
-                                return;
-
-                            }
-
-                            /*
-                             * Reset wake retry counter
-                             * after successful reconnect.
-                             */
-
-                            wakeRetryCount = 0;
-
-                            /*
-                             * Wake again.
-                             */
-
-                            wakeScreen(
-                                function(wakeErr) {
-
-                                    if (wakeErr) {
-
-                                        finishError(
-                                            'Wake after reconnect failed: ' +
-                                            wakeErr.message
-                                        );
-
-                                        return;
-
-                                    }
-
-                                    setTimeout(
-                                        function() {
-
-                                            captureFreshFramebuffer(
-                                                msg
-                                            );
-
-                                        },
-                                        WAKE_DELAY
-                                    );
-
-                                }
-                            );
-
-                        }
-                    );
-
-                },
-                1000
-            );
-
-        }
-
-        // ============================================================
-        // Disconnect timer
-        // ============================================================
+        /*
+         * ----------------------------------------------------------
+         * DISCONNECT TIMER
+         * ----------------------------------------------------------
+         */
 
         function scheduleDisconnect() {
 
             if (
-                disconnectTimer !== null
+                disconnectTimer
             ) {
 
                 clearTimeout(
                     disconnectTimer
                 );
-
-                disconnectTimer =
-                    null;
 
             }
 
@@ -1084,25 +756,23 @@ module.exports = function(RED) {
                 setTimeout(
                     function() {
 
-                        if (
-                            busy
-                        ) {
+                        if (busy) {
                             return;
                         }
 
                         if (
                             node.client &&
                             typeof node.client.disconnect ===
-                                'function'
+                                "function"
                         ) {
 
                             node.client.disconnect();
 
-                            node.status({
-                                fill: 'grey',
-                                shape: 'ring',
-                                text: 'idle/disconnected'
-                            });
+                            node.setStatus(
+                                "grey",
+                                "ring",
+                                "idle"
+                            );
 
                         }
 
@@ -1112,44 +782,44 @@ module.exports = function(RED) {
 
         }
 
-        // ============================================================
-        // Finish error
-        // ============================================================
+        /*
+         * ----------------------------------------------------------
+         * ERROR
+         * ----------------------------------------------------------
+         */
 
-        function finishError(
-            message
-        ) {
+        function fail(message) {
 
             busy = false;
 
-            wakeRetryCount = 0;
-
-            reconnectRetryCount = 0;
+            wakeRetry = 0;
 
             node.error(
                 message
             );
 
-            node.status({
-                fill: 'red',
-                shape: 'ring',
-                text: 'error'
-            });
+            node.setStatus(
+                "red",
+                "ring",
+                "error"
+            );
 
         }
 
-        // ============================================================
-        // Close
-        // ============================================================
+        /*
+         * ----------------------------------------------------------
+         * CLOSE
+         * ----------------------------------------------------------
+         */
 
         node.on(
-            'close',
+            "close",
             function() {
 
                 busy = false;
 
                 if (
-                    disconnectTimer !== null
+                    disconnectTimer
                 ) {
 
                     clearTimeout(
@@ -1171,7 +841,9 @@ module.exports = function(RED) {
                             node
                         );
 
-                    if (index >= 0) {
+                    if (
+                        index >= 0
+                    ) {
 
                         node.client.nodes.splice(
                             index,
@@ -1187,13 +859,9 @@ module.exports = function(RED) {
 
     }
 
-    // ================================================================
-    // Register Node-RED node
-    // ================================================================
-
     RED.nodes.registerType(
-        'screenshot',
-        screenshotNode
+        "screenshot",
+        ScreenshotNode
     );
 
 };
