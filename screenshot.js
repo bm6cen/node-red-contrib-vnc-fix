@@ -1,257 +1,1199 @@
 var Jimp = require('jimp');
 
 module.exports = function(RED) {
-    function screenshotNode(config) {
-        RED.nodes.createNode(this, config);
-        var node = this;
-        this.client = RED.nodes.getNode(config.client);
-        if (this.client) {
-            if (!this.client.nodes) {
-                this.client.nodes = [];
-            }
-            this.client.nodes.push(this);
-        }
-        var disconnectTimer = null;
-        var busy = false;
-        var wakeRetryCount = 0;
-        var sameRetryCount = 0;
-        const MAX_WAKE_RETRIES = 3;
-        const WAKE_DELAY = 1500; // 1.5秒
-        const CAPTURE_TIMEOUT = 2500; // 2.5秒
-        const BLACK_THRESHOLD = 0.9; // 90%
-        const MAX_SAME_RETRIES = 3;
-        // store last frame per client
-        var lastFrames = {};
 
-        node.on('input', function(msg) {
-            if (busy) {
-                node.warn('Screenshot already in progress - request ignored');
-                return;
+    function screenshotNode(config) {
+
+        RED.nodes.createNode(
+            this,
+            config
+        );
+
+        var node = this;
+
+        // ============================================================
+        // VNC client
+        // ============================================================
+
+        this.client =
+            RED.nodes.getNode(
+                config.client
+            );
+
+        if (!this.client) {
+
+            node.error(
+                'Missing VNC client configuration'
+            );
+
+            return;
+
+        }
+
+        if (!this.client.nodes) {
+            this.client.nodes = [];
+        }
+
+        this.client.nodes.push(
+            this
+        );
+
+        // ============================================================
+        // Configuration
+        // ============================================================
+
+        var disconnectTimer = null;
+
+        var busy = false;
+
+        var wakeRetryCount = 0;
+
+        var reconnectRetryCount = 0;
+
+        var MAX_WAKE_RETRIES = 3;
+
+        var MAX_RECONNECT_RETRIES = 2;
+
+        var WAKE_DELAY = 1500;
+
+        var CAPTURE_TIMEOUT = 6000;
+
+        var BLACK_THRESHOLD = 0.90;
+
+        var BLACK_PIXEL_THRESHOLD = 12;
+
+        // ============================================================
+        // Input
+        // ============================================================
+
+        node.on(
+            'input',
+            function(msg) {
+
+                if (busy) {
+
+                    node.warn(
+                        'Screenshot already in progress - request ignored'
+                    );
+
+                    return;
+
+                }
+
+                if (!node.client) {
+
+                    node.error(
+                        'Missing VNC client configuration'
+                    );
+
+                    return;
+
+                }
+
+                busy = true;
+
+                wakeRetryCount = 0;
+
+                reconnectRetryCount = 0;
+
+                node.status({
+                    fill: 'yellow',
+                    shape: 'dot',
+                    text: 'starting capture'
+                });
+
+                captureAndSend(
+                    msg
+                );
+
             }
-            if (!this.client) {
-                node.error('Missing VNC client configuration');
-                return;
-            }
-            busy = true;
-            wakeRetryCount = 0;
-            sameRetryCount = 0;
-            node.status({fill:'yellow',shape:'dot',text:'capturing...'});
-            captureAndSend(msg);
-        });
+        );
+
+        // ============================================================
+        // Main capture
+        // ============================================================
 
         function captureAndSend(msg) {
-            this.client.perform(function(err) {
-                if (err) {
-                    finishError('VNC perform error: ' + err);
-                    return;
-                }
-                // Wait for fresh frame
-                this.client.getFreshFrame(CAPTURE_TIMEOUT, function(err2, frameInfo) {
-                    if (err2) {
-                        finishError('Failed to get fresh frame: ' + err2);
-                        return;
-                    }
-                    // Now capture
-                    this.client.perform(function(err3) {
-                        if (err3) {
-                            finishError('Second perform error: ' + err3);
-                            return;
-                        }
-                        var r = this.client.rfb;
-                        if (!r) {
-                            finishError('No RFB instance');
-                            return;
-                        }
-                        function onRect(rect) {
-                            try {
-                                var png = new Jimp({data: parseRectAsRGBABuffer(rect), height: rect.height, width: rect.width});
-                                png.getBuffer(Jimp.MIME_PNG, function(err4, buf) {
-                                    if (err4) {
-                                        finishError('Jimp buffer error: ' + err4);
-                                        return;
-                                    }
-                                    // Check if image is mostly black
-                                    if (isMostlyBlack(buf)) {
-                                        // If not yet retried, wake again and retry
-                                        if (wakeRetryCount < MAX_WAKE_RETRIES) {
-                                            wakeRetryCount++;
-                                            node.warn('Detected mostly black image, waking VNC again...');
-                                            // Wake VNC with pointer moves and double click at (0,0)
-                                            this.client.perform(function(wakeErr) {
-                                                if (wakeErr) {
-                                                    node.error('Wake failed: ' + wakeErr);
-                                                }
-                                                // perform wake sequence
-                                                var rfb = this.client.rfb;
-                                                if (rfb) {
-                                                    // move to (0,0)
-                                                    rfb.pointerEvent(0, 0, 0);
-                                                    setTimeout(function() {
-                                                        // move to (1,1)
-                                                        rfb.pointerEvent(1, 1, 0);
-                                                        setTimeout(function() {
-                                                            // first click at (0,0)
-                                                            rfb.pointerEvent(0, 0, 1); // down
-                                                            setTimeout(function() {
-                                                                rfb.pointerEvent(0, 0, 0); // up
-                                                                setTimeout(function() {
-                                                                    // second click at (0,0)
-                                                                    rfb.pointerEvent(0, 0, 1); // down
-                                                                    setTimeout(function() {
-                                                                        rfb.pointerEvent(0, 0, 0); // up
-                                                                        // after wake, wait a bit then retry capture
-                                                                        setTimeout(function() {
-                                                                            captureAndSend(msg);
-                                                                        }.bind(this), WAKE_DELAY);
-                                                                    }.bind(this), 50);
-                                                                }.bind(this), 50);
-                                                            }.bind(this), 50);
-                                                        }.bind(this), 50);
-                                                    }.bind(this), 50);
-                                                } else {
-                                                    // fallback: just wait then retry
-                                                    setTimeout(function() {
-                                                        captureAndSend(msg);
-                                                    }.bind(this), WAKE_DELAY);
-                                                }
-                                            }.bind(this));
-                                            return;
-                                        } else {
-                                            // Exceeded wake retries, force reconnect
-                                            node.warn('Exceeded wake retries, forcing VNC reconnect...');
-                                            forceReconnectAndRetry(msg);
-                                            return;
-                                        }
-                                    }
-                                    // Check if same as last frame for this client
-                                    var clientId = this.client.id || this.client.host + ':' + this.client.port;
-                                    var last = lastFrames[clientId];
-                                    if (last && buf.equals(last)) {
-                                        // same frame
-                                        if (sameRetryCount < MAX_SAME_RETRIES) {
-                                            sameRetryCount++;
-                                            node.warn('Same frame as last (' + sameRetryCount + '/' + MAX_SAME_RETRIES + '), retrying...');
-                                            // small delay then retry capture
-                                            setTimeout(function() {
-                                                captureAndSend(msg);
-                                            }.bind(this), 500);
-                                            return;
-                                        } else {
-                                            node.warn('Same frame after ' + MAX_SAME_RETRIES + ' retries, forcing VNC reconnect...');
-                                            forceReconnectAndRetry(msg);
-                                            return;
-                                        }
-                                    }
-                                    // Good image
-                                    msg.payload = buf;
-                                    node.send(msg);
-                                    // Store as last frame
-                                    lastFrames[clientId] = buf;
-                                    // Reset same counter
-                                    sameRetryCount = 0;
-                                    // Start disconnect timer
-                                    if (disconnectTimer !== null) {
-                                        clearTimeout(disconnectTimer);
-                                    }
-                                    disconnectTimer = setTimeout(function() {
-                                        if (node.client && typeof node.client.disconnect === 'function') {
-                                            node.client.disconnect();
-                                            node.status({fill:'green',shape:'dot',text:'disconnected'});
-                                        }
-                                    }, 3 * 60 * 1000);
-                                });
-                            } catch (e) {
-                                finishError('Jimp error: ' + e);
-                            }
-                            r.removeListener('rect', onRect);
-                        }
-                        r.once('rect', onRect);
-                        // Request full update
-                        r.requestUpdate(true, 0, 0, r.width, r.height);
-                    }.bind(this));
-                }.bind(this));
-            }.bind(this));
-        }
 
-        function forceReconnectAndRetry(msg) {
-            // Disconnect if possible
-            if (this.client && typeof this.client.disconnect === 'function') {
-                try {
-                    this.client.disconnect();
-                } catch (e) {
-                    node.error('Disconnect error: ' + e);
-                }
+            if (!node.client) {
+
+                finishError(
+                    'VNC client unavailable'
+                );
+
+                return;
+
             }
-            // Reset state
-            busy = false;
-            wakeRetryCount = 0;
-            sameRetryCount = 0;
-            // Wait a bit then retry capture (will reconnect via perform)
-            setTimeout(function() {
-                node.status({fill:'yellow',shape:'dot',text:'reconnecting...'});
-                captureAndSend(msg);
-            }.bind(this), 1000);
-        }
 
-        function finishError(errMsg) {
-            busy = false;
-            node.error(errMsg);
-            node.status({fill:'red',shape:'ring',text:'error'});
-        }
-
-        function isMostlyBlack(pngBuf) {
-            // Quick heuristic: check first few pixels; if all near zero, likely black
-            // We'll decode with Jimp again for simplicity (could be optimized)
-            Jimp.read(pngBuf, function(err, image) {
-                if (err) return true; // treat as black on error
-                var blackCount = 0;
-                var total = image.bitmap.width * image.bitmap.height;
-                var limit = Math.min(total, 100); // sample up to 100 pixels
-                var idx = 0;
-                for (var y = 0; y < image.bitmap.height && idx < limit; y++) {
-                    for (var x = 0; x < image.bitmap.width && idx < limit; x++) {
-                        var rgba = image.getPixelColor(x, y);
-                        var r = Jimp.int32ToRGBA(rgba).r;
-                        var g = Jimp.int32ToRGBA(rgba).g;
-                        var b = Jimp.int32ToRGBA(rgba).b;
-                        if (r < 10 && g < 10 && b < 10) blackCount++;
-                        idx++;
-                    }
-                }
-                // If more than threshold sampled pixels are black, treat as black
-                node.warn('Black pixel ratio: ' + (blackCount / limit));
-                return (blackCount / limit) > BLACK_THRESHOLD;
+            node.status({
+                fill: 'yellow',
+                shape: 'dot',
+                text: 'connecting'
             });
-            // Synchronous fallback: assume not black if we can't wait
-            return false;
+
+            node.client.perform(
+                function(err) {
+
+                    if (err) {
+
+                        handleConnectionError(
+                            msg,
+                            err
+                        );
+
+                        return;
+
+                    }
+
+                    /*
+                     * At this point TCP/VNC connection exists.
+                     *
+                     * Wake the HMI before requesting the
+                     * framebuffer.
+                     */
+
+                    wakeScreen(
+                        function(wakeErr) {
+
+                            if (wakeErr) {
+
+                                finishError(
+                                    'Wake sequence failed: ' +
+                                    wakeErr.message
+                                );
+
+                                return;
+
+                            }
+
+                            /*
+                             * Give the HMI/VNC server time to
+                             * repaint after wake-up.
+                             */
+
+                            setTimeout(
+                                function() {
+
+                                    captureFreshFramebuffer(
+                                        msg
+                                    );
+
+                                },
+                                WAKE_DELAY
+                            );
+
+                        }
+                    );
+
+                }
+            );
+
         }
 
-        node.on('close', function() {
-            if (this.client) {
-                var idx = this.client.nodes.indexOf(this);
-                if (idx >= 0) this.client.nodes.splice(idx,1);
-            }
-            if (disconnectTimer !== null) {
-                clearTimeout(disconnectTimer);
-            }
-        });
-    }
+        // ============================================================
+        // Wake HMI
+        // ============================================================
 
-    function allocBinaryBuffer(size) {
-        return Buffer.alloc(size);
-    }
+        function wakeScreen(callback) {
 
-    function parseRectAsRGBABuffer(rect) {
-        const size = rect.width * rect.height * 4;
-        const rgba = allocBinaryBuffer(size);
-        for (let i = 0; i < size; i += 4) {
-            rgba.writeUInt8(rect.data[i + 2], i);     // R
-            rgba.writeUInt8(rect.data[i + 1], i + 1); // G
-            rgba.writeUInt8(rect.data[i], i + 2);     // B
-            rgba.writeUInt8(255, i + 3);              // A
+            callback =
+                callback ||
+                function() {};
+
+            if (
+                !node.client ||
+                !node.client.rfb
+            ) {
+
+                callback(
+                    new Error(
+                        'VNC connection unavailable'
+                    )
+                );
+
+                return;
+
+            }
+
+            var r =
+                node.client.rfb;
+
+            try {
+
+                /*
+                 * Wake sequence:
+                 *
+                 * move 0,0
+                 * move 1,1
+                 * click
+                 * click
+                 */
+
+                r.pointerEvent(
+                    0,
+                    0,
+                    0
+                );
+
+                setTimeout(
+                    function() {
+
+                        if (
+                            !node.client ||
+                            !node.client.rfb
+                        ) {
+
+                            callback(
+                                new Error(
+                                    'VNC disconnected during wake'
+                                )
+                            );
+
+                            return;
+
+                        }
+
+                        node.client.rfb.pointerEvent(
+                            1,
+                            1,
+                            0
+                        );
+
+                        setTimeout(
+                            function() {
+
+                                if (
+                                    !node.client ||
+                                    !node.client.rfb
+                                ) {
+
+                                    callback(
+                                        new Error(
+                                            'VNC disconnected during wake'
+                                        )
+                                    );
+
+                                    return;
+
+                                }
+
+                                node.client.rfb.pointerEvent(
+                                    0,
+                                    0,
+                                    1
+                                );
+
+                                setTimeout(
+                                    function() {
+
+                                        if (
+                                            !node.client ||
+                                            !node.client.rfb
+                                        ) {
+
+                                            callback(
+                                                new Error(
+                                                    'VNC disconnected during wake'
+                                                )
+                                            );
+
+                                            return;
+
+                                        }
+
+                                        node.client.rfb.pointerEvent(
+                                            0,
+                                            0,
+                                            0
+                                        );
+
+                                        setTimeout(
+                                            function() {
+
+                                                if (
+                                                    !node.client ||
+                                                    !node.client.rfb
+                                                ) {
+
+                                                    callback(
+                                                        new Error(
+                                                            'VNC disconnected during wake'
+                                                        )
+                                                    );
+
+                                                    return;
+
+                                                }
+
+                                                node.client.rfb.pointerEvent(
+                                                    0,
+                                                    0,
+                                                    1
+                                                );
+
+                                                setTimeout(
+                                                    function() {
+
+                                                        if (
+                                                            !node.client ||
+                                                            !node.client.rfb
+                                                        ) {
+
+                                                            callback(
+                                                                new Error(
+                                                                    'VNC disconnected during wake'
+                                                                )
+                                                            );
+
+                                                            return;
+
+                                                        }
+
+                                                        node.client.rfb.pointerEvent(
+                                                            0,
+                                                            0,
+                                                            0
+                                                        );
+
+                                                        callback();
+
+                                                    },
+                                                    50
+                                                );
+
+                                            },
+                                            50
+                                        );
+
+                                    },
+                                    50
+                                );
+
+                            },
+                            50
+                        );
+
+                    },
+                    50
+                );
+
+            }
+            catch (err) {
+
+                callback(err);
+
+            }
+
         }
-        return rgba;
+
+        // ============================================================
+        // Capture fresh framebuffer
+        // ============================================================
+
+        function captureFreshFramebuffer(
+            msg
+        ) {
+
+            if (
+                !node.client ||
+                !node.client.connected
+            ) {
+
+                handleConnectionError(
+                    msg,
+                    new Error(
+                        'VNC disconnected before framebuffer capture'
+                    )
+                );
+
+                return;
+
+            }
+
+            node.status({
+                fill: 'blue',
+                shape: 'dot',
+                text: 'requesting full framebuffer'
+            });
+
+            /*
+             * IMPORTANT:
+             *
+             * captureFrame() performs:
+             *
+             * 1. reset framebuffer
+             * 2. reset coverage
+             * 3. requestUpdate(false)
+             * 4. collect ALL RECTs
+             * 5. wait until coverage = 100%
+             * 6. return complete framebuffer
+             */
+
+            node.client.captureFrame(
+                CAPTURE_TIMEOUT,
+                function(
+                    err,
+                    frame
+                ) {
+
+                    if (err) {
+
+                        handleFrameError(
+                            msg,
+                            err
+                        );
+
+                        return;
+
+                    }
+
+                    if (!frame) {
+
+                        handleFrameError(
+                            msg,
+                            new Error(
+                                'Empty framebuffer'
+                            )
+                        );
+
+                        return;
+
+                    }
+
+                    if (!frame.complete) {
+
+                        handleFrameError(
+                            msg,
+                            new Error(
+                                'Framebuffer is incomplete'
+                            )
+                        );
+
+                        return;
+
+                    }
+
+                    node.status({
+                        fill: 'blue',
+                        shape: 'dot',
+                        text:
+                            'encoding ' +
+                            frame.width +
+                            'x' +
+                            frame.height
+                    });
+
+                    encodeFramebuffer(
+                        msg,
+                        frame
+                    );
+
+                }
+            );
+
+        }
+
+        // ============================================================
+        // Encode framebuffer → PNG
+        // ============================================================
+
+        function encodeFramebuffer(
+            msg,
+            frame
+        ) {
+
+            try {
+
+                var image =
+                    new Jimp({
+                        data: frame.data,
+                        width: frame.width,
+                        height: frame.height
+                    });
+
+                image.getBuffer(
+                    Jimp.MIME_PNG,
+                    function(
+                        err,
+                        pngBuffer
+                    ) {
+
+                        if (err) {
+
+                            finishError(
+                                'PNG encoding error: ' +
+                                err.message
+                            );
+
+                            return;
+
+                        }
+
+                        /*
+                         * Correctly await black-screen
+                         * analysis.
+                         */
+
+                        isMostlyBlack(
+                            pngBuffer,
+                            function(
+                                blackErr,
+                                isBlack,
+                                ratio
+                            ) {
+
+                                if (blackErr) {
+
+                                    finishError(
+                                        'Black-screen detection error: ' +
+                                        blackErr.message
+                                    );
+
+                                    return;
+
+                                }
+
+                                if (isBlack) {
+
+                                    handleBlackFrame(
+                                        msg,
+                                        ratio
+                                    );
+
+                                    return;
+
+                                }
+
+                                /*
+                                 * SUCCESS
+                                 */
+
+                                msg.payload =
+                                    pngBuffer;
+
+                                /*
+                                 * Optional metadata.
+                                 *
+                                 * Existing flows using only
+                                 * msg.payload are unaffected.
+                                 */
+
+                                msg.vnc =
+                                    msg.vnc ||
+                                    {};
+
+                                msg.vnc.frameSequence =
+                                    frame.sequence;
+
+                                msg.vnc.frameTimestamp =
+                                    frame.timestamp;
+
+                                msg.vnc.width =
+                                    frame.width;
+
+                                msg.vnc.height =
+                                    frame.height;
+
+                                msg.vnc.coverage =
+                                    frame.coveredPixels +
+                                    '/' +
+                                    frame.totalPixels;
+
+                                msg.vnc.complete =
+                                    frame.complete;
+
+                                node.send(
+                                    msg
+                                );
+
+                                node.status({
+                                    fill: 'green',
+                                    shape: 'dot',
+                                    text:
+                                        'frame ' +
+                                        frame.sequence +
+                                        ' ready'
+                                });
+
+                                scheduleDisconnect();
+
+                                /*
+                                 * Capture finished.
+                                 */
+
+                                busy = false;
+
+                                wakeRetryCount = 0;
+
+                                reconnectRetryCount = 0;
+
+                            }
+
+                        );
+
+                    }
+                );
+
+            }
+            catch (err) {
+
+                finishError(
+                    'Framebuffer/Jimp error: ' +
+                    err.message
+                );
+
+            }
+
+        }
+
+        // ============================================================
+        // Black screen detection
+        // ============================================================
+
+        function isMostlyBlack(
+            pngBuffer,
+            callback
+        ) {
+
+            Jimp.read(
+                pngBuffer,
+                function(
+                    err,
+                    image
+                ) {
+
+                    if (err) {
+
+                        callback(
+                            err,
+                            false,
+                            0
+                        );
+
+                        return;
+
+                    }
+
+                    var width =
+                        image.bitmap.width;
+
+                    var height =
+                        image.bitmap.height;
+
+                    var total =
+                        width * height;
+
+                    if (total <= 0) {
+
+                        callback(
+                            null,
+                            true,
+                            1
+                        );
+
+                        return;
+
+                    }
+
+                    /*
+                     * Instead of only checking the first 100
+                     * pixels, sample the whole image with a
+                     * controlled stride.
+                     *
+                     * This avoids a black top-left corner
+                     * causing a false positive.
+                     */
+
+                    var maxSamples = 5000;
+
+                    var step =
+                        Math.max(
+                            1,
+                            Math.floor(
+                                total /
+                                maxSamples
+                            )
+                        );
+
+                    var blackCount = 0;
+
+                    var samples = 0;
+
+                    for (
+                        var index = 0;
+                        index < total;
+                        index += step
+                    ) {
+
+                        var x =
+                            index % width;
+
+                        var y =
+                            Math.floor(
+                                index / width
+                            );
+
+                        var rgba =
+                            Jimp.int32ToRGBA(
+                                image.getPixelColor(
+                                    x,
+                                    y
+                                )
+                            );
+
+                        if (
+                            rgba.r <=
+                                BLACK_PIXEL_THRESHOLD &&
+                            rgba.g <=
+                                BLACK_PIXEL_THRESHOLD &&
+                            rgba.b <=
+                                BLACK_PIXEL_THRESHOLD
+                        ) {
+
+                            blackCount++;
+
+                        }
+
+                        samples++;
+
+                    }
+
+                    var ratio =
+                        samples > 0
+                            ? blackCount /
+                              samples
+                            : 1;
+
+                    callback(
+                        null,
+                        ratio >=
+                            BLACK_THRESHOLD,
+                        ratio
+                    );
+
+                }
+            );
+
+        }
+
+        // ============================================================
+        // Handle black frame
+        // ============================================================
+
+        function handleBlackFrame(
+            msg,
+            ratio
+        ) {
+
+            node.warn(
+                'Mostly black framebuffer detected: ' +
+                Math.round(
+                    ratio * 100
+                ) +
+                '%'
+            );
+
+            if (
+                wakeRetryCount <
+                MAX_WAKE_RETRIES
+            ) {
+
+                wakeRetryCount++;
+
+                node.status({
+                    fill: 'yellow',
+                    shape: 'ring',
+                    text:
+                        'wake retry ' +
+                        wakeRetryCount +
+                        '/' +
+                        MAX_WAKE_RETRIES
+                });
+
+                wakeScreen(
+                    function(err) {
+
+                        if (err) {
+
+                            handleFrameError(
+                                msg,
+                                err
+                            );
+
+                            return;
+
+                        }
+
+                        setTimeout(
+                            function() {
+
+                                captureFreshFramebuffer(
+                                    msg
+                                );
+
+                            },
+                            WAKE_DELAY
+                        );
+
+                    }
+                );
+
+                return;
+
+            }
+
+            /*
+             * Wake retries exhausted.
+             *
+             * Reconnect completely.
+             */
+
+            if (
+                reconnectRetryCount <
+                MAX_RECONNECT_RETRIES
+            ) {
+
+                reconnectRetryCount++;
+
+                node.warn(
+                    'Wake retries exhausted. ' +
+                    'Forcing VNC reconnect ' +
+                    reconnectRetryCount +
+                    '/' +
+                    MAX_RECONNECT_RETRIES
+                );
+
+                forceReconnect(
+                    msg
+                );
+
+                return;
+
+            }
+
+            finishError(
+                'Unable to obtain a non-black framebuffer after wake/reconnect retries'
+            );
+
+        }
+
+        // ============================================================
+        // Frame error
+        // ============================================================
+
+        function handleFrameError(
+            msg,
+            err
+        ) {
+
+            node.warn(
+                'Framebuffer capture failed: ' +
+                err.message
+            );
+
+            if (
+                reconnectRetryCount <
+                MAX_RECONNECT_RETRIES
+            ) {
+
+                reconnectRetryCount++;
+
+                forceReconnect(
+                    msg
+                );
+
+                return;
+
+            }
+
+            finishError(
+                'Framebuffer capture failed: ' +
+                err.message
+            );
+
+        }
+
+        // ============================================================
+        // Connection error
+        // ============================================================
+
+        function handleConnectionError(
+            msg,
+            err
+        ) {
+
+            if (
+                reconnectRetryCount <
+                MAX_RECONNECT_RETRIES
+            ) {
+
+                reconnectRetryCount++;
+
+                node.warn(
+                    'VNC connection problem: ' +
+                    err.message +
+                    ' - reconnecting'
+                );
+
+                forceReconnect(
+                    msg
+                );
+
+                return;
+
+            }
+
+            finishError(
+                'VNC connection error: ' +
+                err.message
+            );
+
+        }
+
+        // ============================================================
+        // Force reconnect
+        // ============================================================
+
+        function forceReconnect(
+            msg
+        ) {
+
+            node.status({
+                fill: 'yellow',
+                shape: 'ring',
+                text: 'reconnecting'
+            });
+
+            try {
+
+                if (
+                    node.client &&
+                    typeof node.client.disconnect ===
+                        'function'
+                ) {
+
+                    node.client.disconnect();
+
+                }
+
+            }
+            catch (err) {
+
+                node.warn(
+                    'Disconnect error: ' +
+                    err.message
+                );
+
+            }
+
+            setTimeout(
+                function() {
+
+                    if (!node.client) {
+
+                        finishError(
+                            'VNC client unavailable'
+                        );
+
+                        return;
+
+                    }
+
+                    node.client.perform(
+                        function(err) {
+
+                            if (err) {
+
+                                finishError(
+                                    'Reconnect failed: ' +
+                                    err.message
+                                );
+
+                                return;
+
+                            }
+
+                            /*
+                             * Reset wake retry counter
+                             * after successful reconnect.
+                             */
+
+                            wakeRetryCount = 0;
+
+                            /*
+                             * Wake again.
+                             */
+
+                            wakeScreen(
+                                function(wakeErr) {
+
+                                    if (wakeErr) {
+
+                                        finishError(
+                                            'Wake after reconnect failed: ' +
+                                            wakeErr.message
+                                        );
+
+                                        return;
+
+                                    }
+
+                                    setTimeout(
+                                        function() {
+
+                                            captureFreshFramebuffer(
+                                                msg
+                                            );
+
+                                        },
+                                        WAKE_DELAY
+                                    );
+
+                                }
+                            );
+
+                        }
+                    );
+
+                },
+                1000
+            );
+
+        }
+
+        // ============================================================
+        // Disconnect timer
+        // ============================================================
+
+        function scheduleDisconnect() {
+
+            if (
+                disconnectTimer !== null
+            ) {
+
+                clearTimeout(
+                    disconnectTimer
+                );
+
+                disconnectTimer =
+                    null;
+
+            }
+
+            disconnectTimer =
+                setTimeout(
+                    function() {
+
+                        if (
+                            busy
+                        ) {
+                            return;
+                        }
+
+                        if (
+                            node.client &&
+                            typeof node.client.disconnect ===
+                                'function'
+                        ) {
+
+                            node.client.disconnect();
+
+                            node.status({
+                                fill: 'grey',
+                                shape: 'ring',
+                                text: 'idle/disconnected'
+                            });
+
+                        }
+
+                    },
+                    3 * 60 * 1000
+                );
+
+        }
+
+        // ============================================================
+        // Finish error
+        // ============================================================
+
+        function finishError(
+            message
+        ) {
+
+            busy = false;
+
+            wakeRetryCount = 0;
+
+            reconnectRetryCount = 0;
+
+            node.error(
+                message
+            );
+
+            node.status({
+                fill: 'red',
+                shape: 'ring',
+                text: 'error'
+            });
+
+        }
+
+        // ============================================================
+        // Close
+        // ============================================================
+
+        node.on(
+            'close',
+            function() {
+
+                busy = false;
+
+                if (
+                    disconnectTimer !== null
+                ) {
+
+                    clearTimeout(
+                        disconnectTimer
+                    );
+
+                    disconnectTimer =
+                        null;
+
+                }
+
+                if (
+                    node.client &&
+                    node.client.nodes
+                ) {
+
+                    var index =
+                        node.client.nodes.indexOf(
+                            node
+                        );
+
+                    if (index >= 0) {
+
+                        node.client.nodes.splice(
+                            index,
+                            1
+                        );
+
+                    }
+
+                }
+
+            }
+        );
+
     }
 
-    RED.nodes.registerType("screenshot", screenshotNode);
+    // ================================================================
+    // Register Node-RED node
+    // ================================================================
+
+    RED.nodes.registerType(
+        'screenshot',
+        screenshotNode
+    );
+
 };
